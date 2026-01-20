@@ -164,6 +164,8 @@ def find_fabric(all_fabrics, appliance_name, fabric_instance_type,
 
         raise CLIError(error_msg)
 
+    fabric_type_label = "Source" if is_source else "Target"
+    print(f"*Selected {fabric_type_label} Fabric: '{fabric.get('name')}'")
     return fabric
 
 
@@ -194,6 +196,7 @@ def get_fabric_agent(cmd, replication_fabrics_uri, fabric, appliance_name,
             f"The appliance '{appliance_name}' is in a disconnected state."
         )
 
+    print(f"*Selected Fabric Agent: '{dra.get('name')}'")
     return dra
 
 
@@ -265,7 +268,73 @@ def setup_replication_policy(cmd,
                 cmd, policy_uri, APIVersion.Microsoft_DataReplication.value
             )
             time.sleep(30)
-            policy = None
+            # Refresh policy state after deletion request
+            try:
+                policy = get_resource_by_id(
+                    cmd, policy_uri,
+                    APIVersion.Microsoft_DataReplication.value
+                )
+            except CLIError:
+                policy = None
+
+            # Verify policy is no longer in bad state
+            if policy:
+                provisioning_state = (
+                    policy.get('properties', {}).get('provisioningState')
+                )
+                if provisioning_state in [ProvisioningState.Canceled.value,
+                                          ProvisioningState.Failed.value]:
+                    raise CLIError(
+                        f"Failed to change the Provisioning State of policy "
+                        f"'{policy_name}' by removing. Please re-run this "
+                        f"command or contact support if help needed."
+                    )
+
+        # Wait for Deleting state to complete (timeout after 10 min)
+        if policy and provisioning_state == ProvisioningState.Deleting.value:
+            print(
+                f"Policy '{policy_name}' found in Provisioning State "
+                f"'{provisioning_state}'. Waiting for deletion..."
+            )
+            for i in range(20):
+                time.sleep(30)
+                try:
+                    policy = get_resource_by_id(
+                        cmd, policy_uri,
+                        APIVersion.Microsoft_DataReplication.value
+                    )
+                except CLIError as e:
+                    if ("ResourceNotFound" in str(e) or "404" in str(e) or
+                            "Not Found" in str(e)):
+                        policy = None
+                        break
+                    raise
+
+                if policy:
+                    provisioning_state = (
+                        policy.get('properties', {}).get('provisioningState')
+                    )
+                    if provisioning_state == ProvisioningState.Deleted.value:
+                        print(f"Policy '{policy_name}' was removed.")
+                        break
+                    if provisioning_state != ProvisioningState.Deleting.value:
+                        raise CLIError(
+                            f"Policy '{policy_name}' has an unexpected "
+                            f"Provisioning State of '{provisioning_state}' "
+                            f"during removal process. Please re-run this "
+                            f"command or contact support if help needed."
+                        )
+                else:
+                    print(f"Policy '{policy_name}' was removed.")
+                    break
+
+            # Make sure policy is no longer in Deleting state
+            if policy and provisioning_state == ProvisioningState.Deleting.value:
+                raise CLIError(
+                    f"Policy '{policy_name}' times out with Provisioning "
+                    f"State: '{provisioning_state}'. Please re-run this "
+                    f"command or contact support if help needed."
+                )
 
     # Create policy if needed
     if not policy or (
@@ -335,14 +404,18 @@ def setup_replication_policy(cmd,
             ProvisioningState.Succeeded.value):
         raise CLIError(f"Policy '{policy_name}' is not in Succeeded state.")
 
+    print(f"*Selected Policy: '{policy_name}'")
     return policy
 
 
-def setup_cache_storage_account(cmd, rg_uri, amh_solution,
+def setup_cache_storage_account(cmd, rg_uri, project_uri, amh_solution,
                                 cache_storage_account_id,
                                 source_site_id, source_appliance_name,
                                 migrate_project, project_name):
     """Setup or validate cache storage account."""
+    from azext_migrate.helpers.replication.init._setup_permissions import (
+        clear_amh_solution_storage
+    )
     logger = get_logger(__name__)
 
     amh_stored_storage_account_id = (
@@ -364,6 +437,36 @@ def setup_cache_storage_account(cmd, rg_uri, amh_solution,
             cmd, storage_uri, APIVersion.Microsoft_Storage.value
         )
 
+        # Wait for storage account to reach terminal state (timeout 10 min)
+        if storage_account:
+            storage_state = (
+                storage_account.get('properties', {})
+                .get('provisioningState')
+            )
+            if (storage_state and
+                    storage_state !=
+                    StorageAccountProvisioningState.Succeeded.value):
+                print(
+                    f"Storage account '{storage_account_name}' found in "
+                    f"state '{storage_state}'. Waiting..."
+                )
+                for _ in range(20):
+                    time.sleep(30)
+                    storage_account = get_resource_by_id(
+                        cmd, storage_uri, APIVersion.Microsoft_Storage.value
+                    )
+                    if not storage_account:
+                        break
+                    storage_state = (
+                        storage_account.get('properties', {})
+                        .get('provisioningState')
+                    )
+                    if (not storage_state or
+                            storage_state ==
+                            StorageAccountProvisioningState.Succeeded.value):
+                        break
+
+        # Handle storage account based on its final state
         if storage_account and (
             storage_account
             .get('properties', {})
@@ -378,8 +481,27 @@ def setup_cache_storage_account(cmd, rg_uri, amh_solution,
                     f"A Cache Storage Account '{storage_account_name}' is "
                     f"already linked. "
                 )
-                warning_msg += "Ignoring provided -cache_storage_account_id."
+                warning_msg += "Ignoring provided --cache-storage-account-id."
                 logger.warning(warning_msg)
+        elif storage_account and not (
+            storage_account.get('properties', {}).get('provisioningState')
+        ):
+            # Storage account found but in bad state
+            logger.warning(
+                f"A previously linked Cache Storage Account with Id "
+                f"'{amh_stored_storage_account_id}' is found but in an "
+                f"unusable state. It will be unlinked."
+            )
+            # Clear invalid storage reference from AMH solution
+            clear_amh_solution_storage(cmd, project_uri, amh_solution)
+        elif not storage_account:
+            # Storage account not found, need to clear reference
+            logger.warning(
+                f"Previously linked Cache Storage Account "
+                f"'{storage_account_name}' not found. It will be unlinked."
+            )
+            # Clear invalid storage reference from AMH solution
+            clear_amh_solution_storage(cmd, project_uri, amh_solution)
 
     # Use user-provided storage account if no existing one
     if not cache_storage_account and cache_storage_account_id:
@@ -474,6 +596,12 @@ def setup_cache_storage_account(cmd, rg_uri, amh_solution,
     ):
         raise CLIError("Failed to setup Cache Storage Account.")
 
+    storage_name = cache_storage_account.get('name', 'unknown')
+    storage_location = cache_storage_account.get('location', 'unknown')
+    print(
+        f"*Selected Cache Storage Account: '{storage_name}' "
+        f"at Location '{storage_location}'"
+    )
     return cache_storage_account
 
 

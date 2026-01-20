@@ -2935,6 +2935,7 @@ class MigrateInitSetupExtensionTests(unittest.TestCase):
     def test_get_or_check_existing_extension_failed_state(self, mock_sleep, mock_get_resource, mock_delete):
         """Test when extension exists in failed state."""
         from azext_migrate.helpers.replication.init._setup_extension import get_or_check_existing_extension
+        from knack.util import CLIError
         
         mock_cmd = mock.Mock()
         
@@ -2947,7 +2948,11 @@ class MigrateInitSetupExtensionTests(unittest.TestCase):
             }
         }
         
-        mock_get_resource.return_value = extension_data
+        # First call returns failed extension, second call (after delete) raises not found
+        mock_get_resource.side_effect = [
+            extension_data,
+            CLIError("ResourceNotFound")
+        ]
         
         extension_uri = '/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.DataReplication/replicationVaults/vault1/replicationExtensions/ext1'
         

@@ -67,48 +67,194 @@ def get_or_check_existing_extension(cmd, extension_uri,
             f"state: {existing_state}"
         )
 
-        # Check if configuration matches
-        config_matches = (
-            existing_storage_id == storage_account_id and
-            existing_instance_type == instance_type and
-            existing_source_fabric == source_fabric_id and
-            existing_target_fabric == target_fabric_id
-        )
-
-        # If it's succeeded with the correct configuration, we're done
-        if (existing_state == ProvisioningState.Succeeded.value and
-                config_matches):
+        # Wait for Creating/Updating to complete (timeout 10 min)
+        if existing_state in [ProvisioningState.Creating.value,
+                              ProvisioningState.Updating.value]:
             print(
-                "Replication Extension already exists with correct "
-                "configuration."
+                f"Extension '{replication_extension_name}' found in "
+                f"Provisioning State '{existing_state}'. Waiting..."
             )
-            print("Successfully initialized replication infrastructure")
-            return None, True, False  # Signal that we're done
+            for _ in range(20):
+                time.sleep(30)
+                try:
+                    replication_extension = get_resource_by_id(
+                        cmd, extension_uri,
+                        APIVersion.Microsoft_DataReplication.value
+                    )
+                except CLIError:
+                    replication_extension = None
+                    break
 
-        # If configuration doesn't match, we need to update it
-        if existing_state == ProvisioningState.Succeeded.value and not config_matches:
-            print(
-                "Extension exists but configuration doesn't match. "
-                "Will update it."
+                if replication_extension:
+                    existing_state = (
+                        replication_extension.get('properties', {})
+                        .get('provisioningState')
+                    )
+                    if existing_state not in [ProvisioningState.Creating.value,
+                                              ProvisioningState.Updating.value]:
+                        break
+
+            # Make sure extension is no longer in Creating/Updating state
+            if (replication_extension and
+                    existing_state in [ProvisioningState.Creating.value,
+                                       ProvisioningState.Updating.value]):
+                raise CLIError(
+                    f"Extension '{replication_extension_name}' times out "
+                    f"with Provisioning State: '{existing_state}'. Please "
+                    f"re-run this command or contact support if help needed."
+                )
+
+        # Check if configuration matches (refresh custom_props after waiting)
+        if replication_extension:
+            existing_state = (
+                replication_extension.get('properties', {})
+                .get('provisioningState')
             )
-            if existing_storage_id != storage_account_id:
-                print("  - Storage account mismatch")
-            if existing_instance_type != instance_type:
-                print("  - Instance type mismatch")
-            if existing_source_fabric != source_fabric_id:
-                print("  - Source fabric mismatch")
-            if existing_target_fabric != target_fabric_id:
-                print("  - Target fabric mismatch")
-            return replication_extension, False, True  # Signal to update
+            custom_props = (replication_extension
+                            .get('properties', {})
+                            .get('customProperties', {}))
+            existing_storage_id = custom_props.get('storageAccountId')
+            existing_instance_type = custom_props.get('instanceType')
+            if instance_type == AzLocalInstanceTypes.VMwareToAzLocal.value:
+                existing_source_fabric = custom_props.get('vmwareFabricArmId')
+            else:
+                existing_source_fabric = custom_props.get('hyperVFabricArmId')
+            existing_target_fabric = custom_props.get('azStackHciFabricArmId')
+
+            config_matches = (
+                existing_storage_id == storage_account_id and
+                existing_instance_type == instance_type and
+                existing_source_fabric == source_fabric_id and
+                existing_target_fabric == target_fabric_id
+            )
+
+            # If it's succeeded with the correct configuration, we're done
+            if (existing_state == ProvisioningState.Succeeded.value and
+                    config_matches):
+                print(
+                    "Replication Extension already exists with correct "
+                    "configuration."
+                )
+                print(
+                    f"*Selected Replication Extension: "
+                    f"'{replication_extension_name}'"
+                )
+                print("Successfully initialized replication infrastructure")
+                return None, True, False  # Signal that we're done
+
+            # If configuration doesn't match, we need to update it
+            if (existing_state == ProvisioningState.Succeeded.value and
+                    not config_matches):
+                print(
+                    "Extension exists but configuration doesn't match. "
+                    "Will update it."
+                )
+                if existing_storage_id != storage_account_id:
+                    print("  - Storage account mismatch")
+                if existing_instance_type != instance_type:
+                    print("  - Instance type mismatch")
+                if existing_source_fabric != source_fabric_id:
+                    print("  - Source fabric mismatch")
+                if existing_target_fabric != target_fabric_id:
+                    print("  - Target fabric mismatch")
+                return replication_extension, False, True  # Signal to update
 
         # If it's in a bad state, delete it
-        if existing_state in [ProvisioningState.Failed.value,
-                              ProvisioningState.Canceled.value]:
-            print(f"Removing existing extension (state: {existing_state})")
+        if (replication_extension and
+                existing_state in [ProvisioningState.Failed.value,
+                                   ProvisioningState.Canceled.value]):
+            print(
+                f"Extension '{replication_extension_name}' found in "
+                f"unusable state '{existing_state}'. Removing..."
+            )
             delete_resource(
                 cmd, extension_uri, APIVersion.Microsoft_DataReplication.value
             )
-            time.sleep(120)
+            time.sleep(30)
+
+            # Verify extension is no longer in bad state
+            try:
+                replication_extension = get_resource_by_id(
+                    cmd, extension_uri,
+                    APIVersion.Microsoft_DataReplication.value
+                )
+            except CLIError:
+                replication_extension = None
+
+            if replication_extension:
+                existing_state = (
+                    replication_extension.get('properties', {})
+                    .get('provisioningState')
+                )
+                if existing_state in [ProvisioningState.Canceled.value,
+                                      ProvisioningState.Failed.value]:
+                    raise CLIError(
+                        f"Failed to change the Provisioning State of "
+                        f"Extension '{replication_extension_name}' by "
+                        f"removing. Please re-run this command or contact "
+                        f"support if help needed."
+                    )
+
+        # Wait for Deleting state to complete (timeout 10 min)
+        if (replication_extension and
+                existing_state == ProvisioningState.Deleting.value):
+            print(
+                f"Extension '{replication_extension_name}' found in "
+                f"Provisioning State '{existing_state}'. "
+                f"Waiting for deletion..."
+            )
+            for _ in range(20):
+                time.sleep(30)
+                try:
+                    replication_extension = get_resource_by_id(
+                        cmd, extension_uri,
+                        APIVersion.Microsoft_DataReplication.value
+                    )
+                except CLIError as e:
+                    if ("ResourceNotFound" in str(e) or "404" in str(e) or
+                            "Not Found" in str(e)):
+                        replication_extension = None
+                        print(
+                            f"Extension '{replication_extension_name}' "
+                            f"was removed."
+                        )
+                        break
+                    raise
+
+                if replication_extension:
+                    existing_state = (
+                        replication_extension.get('properties', {})
+                        .get('provisioningState')
+                    )
+                    if existing_state == ProvisioningState.Deleted.value:
+                        print(
+                            f"Extension '{replication_extension_name}' "
+                            f"was removed."
+                        )
+                        break
+                    if existing_state != ProvisioningState.Deleting.value:
+                        raise CLIError(
+                            f"Extension '{replication_extension_name}' has "
+                            f"unexpected Provisioning State "
+                            f"'{existing_state}' during removal. Please "
+                            f"re-run this command or contact support."
+                        )
+                else:
+                    print(
+                        f"Extension '{replication_extension_name}' "
+                        f"was removed."
+                    )
+                    break
+
+            # Make sure extension is no longer in Deleting state
+            if (replication_extension and
+                    existing_state == ProvisioningState.Deleting.value):
+                raise CLIError(
+                    f"Extension '{replication_extension_name}' times out "
+                    f"with Provisioning State: '{existing_state}'. Please "
+                    f"re-run this command or contact support if help needed."
+                )
+
             return None, False, False
 
     return replication_extension, False, False
@@ -377,5 +523,6 @@ def setup_replication_extension(cmd, rg_uri, replication_vault_name,
         # Create/update the extension
         create_replication_extension(cmd, extension_uri, extension_body)
 
+    print(f"*Selected Replication Extension: '{replication_extension_name}'")
     print("Successfully initialized replication infrastructure")
     return True if pass_thru else None

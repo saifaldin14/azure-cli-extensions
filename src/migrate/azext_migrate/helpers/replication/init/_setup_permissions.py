@@ -197,6 +197,54 @@ def grant_storage_permissions(cmd, storage_account_id, source_dra,
     )
 
 
+def clear_amh_solution_storage(cmd, project_uri, amh_solution):
+    """Clear invalid storage account reference from AMH solution."""
+    amh_solution_uri = (
+        f"{project_uri}/solutions/"
+        f"Servers-Migration-ServerMigration_DataReplication"
+    )
+
+    current_storage_id = (amh_solution
+                          .get('properties', {})
+                          .get('details', {})
+                          .get('extendedDetails', {})
+                          .get('replicationStorageAccountId'))
+
+    if current_storage_id:
+        print(
+            f"Clearing invalid storage account reference "
+            f"'{current_storage_id}' from AMH solution..."
+        )
+
+        extended_details = (amh_solution
+                            .get('properties', {})
+                            .get('details', {})
+                            .get('extendedDetails', {}))
+
+        # Set storage account ID to None to clear it
+        extended_details['replicationStorageAccountId'] = None
+
+        solution_body = {
+            "properties": {
+                "tool": "ServerMigration_DataReplication",
+                "purpose": "Migration",
+                "goal": "Servers",
+                "details": {
+                    "extendedDetails": extended_details
+                }
+            }
+        }
+
+        create_or_update_resource(
+            cmd, amh_solution_uri, APIVersion.Microsoft_Migrate.value,
+            solution_body
+        )
+
+        # Wait for the AMH solution update to propagate
+        time.sleep(30)
+        print("AMH solution storage reference cleared successfully")
+
+
 def update_amh_solution_storage(cmd,
                                 project_uri,
                                 amh_solution,

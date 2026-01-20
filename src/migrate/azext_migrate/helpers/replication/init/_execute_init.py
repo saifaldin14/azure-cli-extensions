@@ -103,14 +103,14 @@ def setup_fabrics_and_dras(cmd, rg_uri, resource_group_name,
     return source_fabric, target_fabric, source_dra, target_dra
 
 
-def setup_storage_and_permissions(cmd, rg_uri, amh_solution,
+def setup_storage_and_permissions(cmd, rg_uri, project_uri, amh_solution,
                                   cache_storage_account_id, source_site_id,
                                   source_appliance_name, migrate_project,
                                   project_name, source_dra, target_dra,
                                   replication_vault, subscription_id):
     """Setup storage account and grant permissions."""
     cache_storage_account = setup_cache_storage_account(
-        cmd, rg_uri, amh_solution, cache_storage_account_id,
+        cmd, rg_uri, project_uri, amh_solution, cache_storage_account_id,
         source_site_id, source_appliance_name, migrate_project, project_name
     )
 
@@ -139,7 +139,7 @@ def initialize_infrastructure_components(cmd, rg_uri, project_uri,
         cmd, rg_uri, replication_vault_name, instance_type)
 
     storage_account_id = setup_storage_and_permissions(
-        cmd, rg_uri, amh_solution, cache_storage_account_id,
+        cmd, rg_uri, project_uri, amh_solution, cache_storage_account_id,
         source_site_id, source_appliance_name, migrate_project, project_name,
         source_dra, target_dra, replication_vault, subscription_id
     )
